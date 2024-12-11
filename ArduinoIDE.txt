@@ -1,0 +1,149 @@
+//-----------SENSOR DE TEMPERATURA IR MLX90614-----------
+
+#include <Wire.h>
+#include <Adafruit_MLX90614.h>
+#include <LiquidCrystal_I2C.h>
+#include "WiFiS3.h"
+#include "Arduino_LED_Matrix.h"
+#include "HX711.h"
+#include <ArduinoJson.h>
+
+// Pins
+#define LED_PIN 2
+#define SCALE_DT A1
+#define SCALE_SCK A0
+
+// Objects initialization
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+LiquidCrystal_I2C lcd(0x3B, 16, 2);
+ArduinoLEDMatrix matrix;
+HX711 scale;
+
+// WiFi credentials
+const char* ssid = "Angelita-2G";
+const char* password = "pedro2503";
+
+// Server
+WiFiServer server(80);
+int status = WL_IDLE_STATUS;
+
+// Global variables
+String header;
+float lastWeight = 0;
+unsigned long alertStartTime = 0;
+bool alertActive = false;
+
+void connectToWiFi() {
+    while (status != WL_CONNECTED) {
+        Serial.print("Conectando-se à rede: ");
+        Serial.println(ssid);
+        status = WiFi.begin(ssid, password);
+        delay(10000);
+    }
+}
+
+void printWiFiStatus() {
+    Serial.print("SSID: ");
+    Serial.println(WiFi.SSID());
+    IPAddress ip = WiFi.localIP();
+    Serial.print("IP Address: ");
+    Serial.println(ip);
+}
+
+void setup() {
+    Serial.begin(9600);
+    Wire.begin();
+
+    // Initialize pins
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+
+    // Initialize sensors
+    mlx.begin();
+    lcd.init();
+    lcd.backlight();
+
+    // Initialize scale
+    scale.begin(SCALE_DT, SCALE_SCK);
+    scale.set_scale(2165.0);
+    scale.tare(20);
+
+    // Connect to WiFi
+    connectToWiFi();
+    server.begin();
+    printWiFiStatus();
+}
+
+void handleWeightChange() {
+    if (!alertActive) return;
+
+    float currentWeight = scale.get_units(5);
+    currentWeight = constrain(currentWeight, 0, 500);
+    
+    if (abs(currentWeight - lastWeight) > 1.0) {
+        digitalWrite(LED_PIN, LOW);
+        alertActive = false;
+    }
+    lastWeight = currentWeight;
+}
+
+void loop() {
+    handleWeightChange();
+
+    // Handle client connections
+    WiFiClient client = server.available();
+    if (client) {
+        String currentLine = "";
+        while (client.connected()) {
+            if (client.available()) {
+                char c = client.read();
+                header += c;
+
+                if (c == '\n') {
+                    if (currentLine.length() == 0) {
+                        client.println("HTTP/1.1 200 OK");
+                        client.println("Content-type:application/json");
+                        client.println("Access-Control-Allow-Origin: *");
+                        client.println();
+
+                        if (header.indexOf("GET /measure-temp") >= 0) {
+                            StaticJsonDocument<200> doc;
+                            doc["temperature"] = mlx.readObjectTempC();
+                            String response;
+                            serializeJson(doc, response);
+                            client.println(response);
+                        } 
+                        else if (header.indexOf("GET /set-alert") >= 0) {
+                            digitalWrite(LED_PIN, HIGH);
+                            alertActive = true;
+                            lastWeight = scale.get_units(5);
+                            client.println("{\"status\":\"ok\"}");
+                        }
+                        break;
+                    } else {
+                        currentLine = "";
+                    }
+                } else if (c != '\r') {
+                    currentLine += c;
+                }
+            }
+        }
+        header = "";
+        client.stop();
+    }
+
+    // Update LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Temp: ");
+    lcd.print(mlx.readObjectTempC());
+    lcd.print("C");
+    lcd.setCursor(0, 1);
+    lcd.print("Peso: ");
+    float weight = scale.get_units(5);
+    weight = constrain(weight, 0, 500);
+    lcd.print(weight, 1);
+    lcd.print("g");
+
+    delay(100);
+}
